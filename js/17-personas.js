@@ -18,7 +18,8 @@ function renderPersonaGrid() {
     grid.innerHTML = '<div class="landing-empty" style="padding:10px 4px;">No personas yet. Click below to add one.</div>';
     return;
   }
-  grid.innerHTML = state.personaCards.map(p => {
+  const total = state.personaCards.length;
+  grid.innerHTML = state.personaCards.map((p, i) => {
     const av = renderAvatar(p.avatar, p.name);
     const freq = (typeof p.injectionFrequency === 'number') ? p.injectionFrequency : 5;
     const freqLabel = freq === 0
@@ -31,19 +32,28 @@ function renderPersonaGrid() {
       ? `${escapeHtml(desc.slice(0, 50))}${desc.length > 50 ? '\u2026' : ''} \u00b7 ${freqLabel}`
       : freqLabel;
     return `
-    <div class="card-item ${p.id === state.activePersonaId ? 'active' : ''}" onclick="activatePersona('${p.id}')">
+    <div class="card-item ${p.id === state.activePersonaId ? 'active' : ''}" onclick="activatePersona('${escapeJsAttr(p.id)}')">
+      ${moveColumnHtml(p.id, p.name, i, total, 'movePersona')}
       <div class="card-avatar">${av}</div>
       <div class="card-info">
         <div class="card-name">${escapeHtml(p.name || 'Unnamed')}</div>
         <div class="card-desc">${subline}</div>
       </div>
       <div class="card-actions">
-        <button class="msg-action-btn btn-edit" onclick="event.stopPropagation();editPersona('${p.id}')">Edit</button>
-        <button class="msg-action-btn" onclick="event.stopPropagation();copyPersona('${p.id}')" title="Duplicate this persona">Copy</button>
-        ${state.personaCards.length > 1 ? `<button class="msg-action-btn btn-delete" onclick="event.stopPropagation();deletePersonaById('${p.id}')" title="Delete this persona">Del</button>` : ''}
+        <button class="msg-action-btn btn-edit" onclick="event.stopPropagation();editPersona('${escapeJsAttr(p.id)}')">Edit</button>
+        <button class="msg-action-btn" onclick="event.stopPropagation();copyPersona('${escapeJsAttr(p.id)}')" title="Duplicate this persona">Copy</button>
+        ${state.personaCards.length > 1 ? `<button class="msg-action-btn btn-delete" onclick="event.stopPropagation();deletePersonaById('${escapeJsAttr(p.id)}')" title="Delete this persona">Del</button>` : ''}
       </div>
     </div>`;
   }).join('');
+}
+
+/* Reorder engine is shared with character cards — see moveCastEntry() in
+   js/15-cards.js, which loads first. Array position is the order here too:
+   personaCards persists as an array in the same blob, so nothing extra is
+   needed to make it stick. */
+function movePersona(id, delta, btn) {
+  moveCastEntry(state.personaCards, id, delta, 'persona-grid', renderPersonaGrid, btn);
 }
 
 function activatePersona(id) {
@@ -243,8 +253,14 @@ function applyActiveCardBackground() {
   const card = getActiveCard();
   const msgArea = document.getElementById('messages');
   if (!msgArea) return;
-  if (card.background && (card.background.startsWith('http') || card.background.startsWith('data:') || card.background.startsWith('file:'))) {
-    msgArea.style.backgroundImage = `url('${card.background}')`;
+  // Same gate as avatars and thumbnails. safeImageUrl drops file: and
+  // suppresses http(s) unless the user opted in.
+  const bg = safeImageUrl(card.background);
+  if (bg) {
+    // Escape the CSS string delimiters too: a permitted URL can still carry a
+    // quote, which would close the url() and steer the request elsewhere.
+    const cssSafe = bg.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    msgArea.style.backgroundImage = `url('${cssSafe}')`;
     msgArea.style.backgroundSize = 'cover';
     msgArea.style.backgroundPosition = 'center';
     msgArea.style.backgroundRepeat = 'no-repeat';

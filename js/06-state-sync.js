@@ -340,11 +340,35 @@ async function restoreFromServer(opts) {
       return false;
     }
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const text = await resp.text();
+    // let, not const: the neutralize step below rewrites this before the
+    // localStorage path consumes it.
+    let text = await resp.text();
     const mtimeHeader = resp.headers.get('X-State-Mtime');
     // Sanity-check: must parse and have at least the threads array
     const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== 'object') throw new Error('malformed backup');
+
+    // /state is a single shared document every paired device can overwrite, so
+    // this blob is not necessarily something this user wrote. Clear the flags
+    // that would make boot execute code out of it; the code itself is kept so
+    // it can be read and switched on here. See neutralizeUntrustedCode.
+    //
+    // The typeof guard is deliberate: 23-card-code.js loads after this file,
+    // and a load-order change should not turn into a hard failure on the
+    // restore path.
+    const neutralized = (typeof neutralizeUntrustedCode === 'function')
+      ? neutralizeUntrustedCode(parsed)
+      : { cards: 0, extensions: false };
+    if (neutralized.cards || neutralized.extensions) {
+      text = JSON.stringify(parsed);   // localStorage path writes the raw text
+      if (!opts.silent) {
+        alert('The server backup contained custom code set to run automatically' +
+              (neutralized.cards ? ' (' + neutralized.cards + ' character card(s))' : '') +
+              (neutralized.extensions ? ' and an extensions list' : '') +
+              '.\n\nIt was restored but left switched OFF. Review it in the ' +
+              'character editor or the extensions panel before enabling it.');
+      }
+    }
 
     // Loop stopper: a backup with no threads must NEVER trigger a reload. The
     // boot check treats "local has no threads" as a reason to restore, so
@@ -482,6 +506,57 @@ function safeParse(raw, fallback, asInt) {
 }
 
 /**
+ * DRY scan window, expressed so that every llama.cpp build accepts it.
+ *
+ * This field used to be hardcoded to -1, which older llama-server read as
+ * the sentinel for "scan the whole context". Upstream has since dropped
+ * that sentinel: the field is now range-checked as 0 <= value <= 2147483647
+ * and its default fell to 64. Newer engines reject -1 outright —
+ *
+ *   upstream HTTP 400: Field 'dry_penalty_last_n': Value must be between
+ *   0 <= value <= 2147483647, but got -1
+ *
+ * — and because this parameter is sent on EVERY request, not only when DRY
+ * is switched on, that 400 killed all generation rather than just DRY runs.
+ * It showed up on Linux first because the .deb pins a recent engine build
+ * (see installer-linux/engine.sha256) while Windows still runs an older one
+ * that honours -1. Nothing about the platform itself is involved.
+ *
+ * Sending the resolved context size keeps the original meaning intact on
+ * both: old builds expanded -1 to exactly this number, and new builds take
+ * it as a plain in-range window. resolveContextLimit() is already clamped
+ * to the model's real ceiling and floored at 2048, so the scan window can
+ * never exceed the context being scanned — and since the prompt builder
+ * never sends more than this many tokens, the window still covers 100% of
+ * what is actually in play.
+ *
+ * Note the value has to stay proportionate, not merely legal: the engine
+ * sizes its DRY ring buffer from this number, so 2147483647 would validate
+ * and then ask for a multi-gigabyte allocation to hold a window that can
+ * never fill.
+ *
+ * Hence the ceiling. resolveContextLimit() clamps to activeModel.maxCtx,
+ * but when no model is loaded yet there is no ceiling to clamp against and
+ * a card carrying a junk contextLimit (hand-edited, or imported from
+ * somewhere odd) passes straight through. Such a value is still legal
+ * upstream and would fail the wrong way — a silent oversized allocation
+ * rather than a 400. 262144 is the largest maxCtx in the registry, so this
+ * cannot trim a window any real model could actually use.
+ *
+ * The fallback only fires if 04-state.js somehow hasn't loaded; 4096 is a
+ * safe in-range window rather than a behavioural choice.
+ */
+const DRY_PENALTY_LAST_N_CEILING = 262144;
+
+function resolveDryPenaltyLastN(card) {
+  const n = (typeof resolveContextLimit === 'function')
+    ? parseInt(resolveContextLimit(card), 10)
+    : NaN;
+  if (isNaN(n) || n < 0) return 4096;
+  return Math.min(n, DRY_PENALTY_LAST_N_CEILING);
+}
+
+/**
  * Build sampler parameters from the active character card.
  * Returns an object to spread into the llama.cpp API body.
  *
@@ -516,7 +591,9 @@ function getCardSamplerParams(card) {
     dry_multiplier:     card.dryMultiplier !== undefined ? card.dryMultiplier : 0,
     dry_base:           card.dryBase !== undefined ? card.dryBase : 1.75,
     dry_allowed_length: card.dryAllowedLength !== undefined ? card.dryAllowedLength : 2,
-    dry_penalty_last_n: -1
+    // Resolved rather than -1: newer engines range-check this field and
+    // reject the old sentinel. See resolveDryPenaltyLastN above.
+    dry_penalty_last_n: resolveDryPenaltyLastN(card)
   };
 }
 
